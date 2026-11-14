@@ -9,7 +9,7 @@ readme = "README.md"
 keywords = ["architecture", "lint", "cargo-subcommand", "modules", "dependencies"]
 categories = ["development-tools", "development-tools::cargo-plugins"]
 exclude = ["tests", ".github"]
-# repository = "https://github.com/arcasoy/edict"
+repository = "https://github.com/arcasoy/edict"
 
 [[bin]]
 name = "cargo-edict"
