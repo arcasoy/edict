@@ -147,3 +147,43 @@ fn edict_obeys_its_own_laws() {
     assert_eq!(code, 0, "{text}");
     assert!(text.contains("0 warnings"), "{text}");
 }
+
+#[test]
+fn glob_imports_resolve_through_barrels() {
+    let v = json("gaps");
+    let cycle = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["rule"] == "cycles")
+        .expect("glob cycle found");
+    assert_eq!(cycle["message"], "module cycle: c -> d::inner -> c");
+}
+
+#[test]
+fn glob_guesses_ignore_lowercase_locals() {
+    let v = json("gaps");
+    let notes: Vec<String> = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|x| x["notes"].as_array().unwrap().clone())
+        .map(|n| n["message"].as_str().unwrap().to_string())
+        .collect();
+    assert!(notes.iter().all(|n| !n.contains("shadow")), "{notes:?}");
+}
+
+#[test]
+fn token_scan_sees_paths_in_non_expression_macros() {
+    let v = json("gaps");
+    let layer = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["rule"] == "layers")
+        .expect("layer violation found");
+    assert_eq!(
+        layer["notes"][0]["message"],
+        "`low` uses `crate::high::make`"
+    );
+}

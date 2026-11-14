@@ -1,0 +1,11 @@
+[facade]
+level = "off"
+
+[[layer]]
+name = "low"
+modules = ["low"]
+
+[[layer]]
+name = "high"
+modules = ["high"]
+depends_on = ["low"]

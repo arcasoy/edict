@@ -64,6 +64,9 @@ pub struct RawRef {
     pub path: Vec<String>,
     pub kind: RefKind,
     pub loc: Loc,
+    /// A guess produced by a glob import (`use crate::foo::*`): keep it only
+    /// if `foo` really defines or re-exports the name.
+    pub candidate: bool,
 }
 
 /// A `pub use` re-export, used to follow paths to the module that actually

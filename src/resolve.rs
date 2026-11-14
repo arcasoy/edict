@@ -29,12 +29,13 @@ pub fn resolve(
         }
         let segs = &rr.path[1..];
         let (written_to, rest) = r.walk(ROOT, segs);
-        let to = match rest.first() {
-            None => written_to,
-            Some(name) => r
-                .definer(written_to, name, &mut BTreeSet::new(), 0)
-                .unwrap_or(written_to),
-        };
+        let defined_at = rest
+            .first()
+            .and_then(|name| r.definer(written_to, name, &mut BTreeSet::new(), 0));
+        if rr.candidate && !rest.is_empty() && defined_at.is_none() {
+            continue; // glob guess that the glob source doesn't actually provide
+        }
+        let to = defined_at.unwrap_or(written_to);
         let mut display = vec!["crate".to_string()];
         display.extend(segs.iter().cloned());
         edges.push(Edge {

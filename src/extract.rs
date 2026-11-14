@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use proc_macro2::Span;
+use proc_macro2::{Spacing, Span, TokenTree};
 use quote::ToTokens;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
@@ -44,6 +44,7 @@ pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
         let mut uses = UseCollector {
             scope: &scope,
             imports: BTreeMap::new(),
+            globs: Vec::new(),
             raw: Vec::new(),
             reexports: Vec::new(),
         };
@@ -55,6 +56,8 @@ pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
         let mut paths = PathCollector {
             scope: &scope,
             imports: &uses.imports,
+            globs: &uses.globs,
+            in_call: false,
             raw: Vec::new(),
             statics: Vec::new(),
             macros: Vec::new(),
@@ -72,6 +75,11 @@ pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
         out.statics.extend(paths.statics);
         out.macros.extend(paths.macros);
     }
+    // The same path can be seen twice on one line (e.g. via a macro's
+    // expression parse and its token scan).
+    let mut seen = BTreeSet::new();
+    out.raw
+        .retain(|r| seen.insert((r.from, r.path.clone(), r.loc.line, r.candidate)));
     out
 }
 
@@ -175,6 +183,8 @@ fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<UseL
 struct UseCollector<'a> {
     scope: &'a Scope<'a>,
     imports: BTreeMap<String, Vec<String>>,
+    /// In-crate glob imports (`use crate::foo::*`), as absolute module paths.
+    globs: Vec<Vec<String>>,
     raw: Vec<RawRef>,
     reexports: Vec<Reexport>,
 }
@@ -224,6 +234,9 @@ impl<'ast> Visit<'ast> for UseCollector<'_> {
                     self.imports.insert(n.clone(), abs.clone());
                 }
             }
+            if name.is_none() && abs[0] == "crate" {
+                self.globs.push(abs.clone());
+            }
             if is_pub {
                 self.reexports.push(Reexport {
                     name: name.filter(|n| n != "_"),
@@ -235,6 +248,7 @@ impl<'ast> Visit<'ast> for UseCollector<'_> {
                 path: abs,
                 kind,
                 loc: loc.clone(),
+                candidate: false,
             });
         }
     }
@@ -243,51 +257,119 @@ impl<'ast> Visit<'ast> for UseCollector<'_> {
 struct PathCollector<'a> {
     scope: &'a Scope<'a>,
     imports: &'a BTreeMap<String, Vec<String>>,
+    globs: &'a [Vec<String>],
+    /// The next path visited is the callee of a call expression.
+    in_call: bool,
     raw: Vec<RawRef>,
     statics: Vec<StaticItem>,
     macros: Vec<MacroUse>,
 }
 
 impl PathCollector<'_> {
-    fn record(&mut self, path: &syn::Path) {
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    /// Record a path written in this module.
+    ///
+    /// `glob_single`: a single-segment name may be resolved through glob
+    /// imports. Only allowed where it is almost certainly an item, not a local
+    /// variable: callees and capitalized names (types, consts, variants).
+    fn record(&mut self, segs: Vec<String>, span: Span, leading_colon: bool, glob_single: bool) {
         let Some(first) = segs.first() else { return };
-        let span = path.segments[0].ident.span();
+        let push = |raw: &mut Vec<RawRef>, path: Vec<String>, candidate: bool| {
+            raw.push(RawRef {
+                from: self.scope.id,
+                path,
+                kind: RefKind::Path,
+                loc: self.scope.loc(span),
+                candidate,
+            });
+        };
 
-        let abs = if path.leading_colon.is_some() {
-            Some(segs.clone())
-        } else if first == "Self" {
-            None
-        } else if let Some(imported) = self.imports.get(first) {
+        if leading_colon {
+            if segs.len() > 1 {
+                push(&mut self.raw, segs, false);
+            }
+            return;
+        }
+        if first == "Self" {
+            return;
+        }
+        if let Some(imported) = self.imports.get(first) {
             let mut p = imported.clone();
             p.extend(segs[1..].iter().cloned());
-            Some(p)
-        } else if segs.len() == 1 {
-            None // local binding, prelude item, or local type
-        } else if first == "crate"
+            if p.len() > 1 {
+                push(&mut self.raw, p, false);
+            }
+            return;
+        }
+        let module_relative = first == "crate"
             || first == "self"
             || first == "super"
             || self.scope.modules[self.scope.id]
                 .children
-                .contains_key(first)
-        {
-            self.scope.absolutize(&segs)
-        } else if self.scope.defined.contains(first) {
-            None // associated item of a local type, e.g. `Foo::new`
-        } else {
-            Some(segs.clone()) // external path, e.g. `std::fs::read`
-        };
+                .contains_key(first);
+        if module_relative {
+            if let Some(abs) = self.scope.absolutize(&segs).filter(|p| p.len() > 1) {
+                push(&mut self.raw, abs, false);
+            }
+            return;
+        }
+        if self.scope.defined.contains(first) {
+            return; // local item, e.g. `Foo::new`
+        }
 
-        if let Some(abs) = abs.filter(|p| p.len() > 1) {
-            let loc = self.scope.loc(span);
-            self.raw.push(RawRef {
-                from: self.scope.id,
-                path: abs,
-                kind: RefKind::Path,
-                loc,
-            });
+        // Not imported by name, not local: maybe it came in through a glob.
+        if segs.len() > 1 || glob_single {
+            for glob in self.globs {
+                let mut p = glob.clone();
+                p.extend(segs.iter().cloned());
+                push(&mut self.raw, p, true);
+            }
+        }
+        if segs.len() > 1 {
+            push(&mut self.raw, segs, false); // external path, e.g. `std::fs::read`
         }
     }
+
+    /// Find `a::b::c` sequences in raw macro tokens, at any nesting depth.
+    fn scan_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        let toks: Vec<TokenTree> = tokens.into_iter().collect();
+        let mut i = 0;
+        while i < toks.len() {
+            match &toks[i] {
+                TokenTree::Group(g) => {
+                    self.scan_tokens(g.stream());
+                    i += 1;
+                }
+                TokenTree::Ident(id) => {
+                    let after_colons = i >= 2 && is_path_sep(&toks, i - 2);
+                    let leading_colon =
+                        after_colons && (i < 3 || !matches!(toks[i - 3], TokenTree::Ident(_)));
+                    let mut segs = vec![id.to_string()];
+                    let mut j = i + 1;
+                    while is_path_sep(&toks, j) {
+                        let Some(TokenTree::Ident(next)) = toks.get(j + 2) else {
+                            break;
+                        };
+                        segs.push(next.to_string());
+                        j += 3;
+                    }
+                    if segs.len() > 1 {
+                        self.record(segs, id.span(), leading_colon, false);
+                    }
+                    i = j;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+}
+
+/// `::` starting at `toks[i]`.
+fn is_path_sep(toks: &[TokenTree], i: usize) -> bool {
+    matches!(
+        (toks.get(i), toks.get(i + 1)),
+        (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
+            if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':'
+    )
 }
 
 impl<'ast> Visit<'ast> for PathCollector<'_> {
@@ -308,8 +390,30 @@ impl<'ast> Visit<'ast> for PathCollector<'_> {
     }
 
     fn visit_path(&mut self, p: &'ast syn::Path) {
-        self.record(p);
+        let segs: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+        let span = p
+            .segments
+            .first()
+            .map(|s| s.ident.span())
+            .unwrap_or_else(Span::call_site);
+        let capitalized = segs
+            .first()
+            .and_then(|f| f.chars().next())
+            .is_some_and(char::is_uppercase);
+        let glob_single = std::mem::take(&mut self.in_call) || capitalized;
+        self.record(segs, span, p.leading_colon.is_some(), glob_single);
         visit::visit_path(self, p);
+    }
+
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(_) = &*c.func {
+            self.in_call = true;
+        }
+        self.visit_expr(&c.func);
+        self.in_call = false;
+        for arg in &c.args {
+            self.visit_expr(arg);
+        }
     }
 
     fn visit_item_static(&mut self, s: &'ast syn::ItemStatic) {
@@ -352,6 +456,9 @@ impl<'ast> Visit<'ast> for PathCollector<'_> {
                 <Self as Visit<'_>>::visit_expr(self, e);
             }
         }
+        // Catch `a::b::c` in macros whose arguments are not plain expressions
+        // (`matches!`, `vec![x; n]`, DSLs, `$crate::` in macro_rules bodies).
+        self.scan_tokens(mac.tokens.clone());
     }
 }
 
