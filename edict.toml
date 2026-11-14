@@ -1,0 +1,36 @@
+# edict's own laws. `cargo edict` on this repo must pass with zero findings.
+
+[cycles]
+granularity = "file"
+
+# Bottom-up. The crate root (main.rs) is the composition root and is exempt.
+
+[[layer]]
+name = "core"
+modules = ["model", "graph", "attrs"]
+pure = true
+
+[[layer]]
+name = "config"
+modules = ["config"]
+depends_on = ["core"]
+pure = true
+
+[[layer]]
+name = "analysis"
+modules = ["extract", "resolve", "rules", "report"]
+depends_on = ["config"]
+pure = true
+
+[[layer]]
+name = "io"
+modules = ["load"]
+depends_on = ["core"]
+
+[[layer]]
+name = "cli"
+modules = ["cli"]
+depends_on = ["analysis", "io"]
+
+[layers]
+require_all = true

@@ -1,0 +1,9 @@
+[[layer]]
+name = "domain"
+modules = ["domain"]
+pure = true
+
+[[layer]]
+name = "app"
+modules = ["app"]
+depends_on = ["domain"]

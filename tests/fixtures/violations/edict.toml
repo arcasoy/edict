@@ -1,0 +1,20 @@
+[global_state]
+allow = ["infra::runtime"]
+
+[limits]
+max_lines = 20
+
+[[layer]]
+name = "domain"
+modules = ["domain", "billing"]
+pure = true
+
+[[layer]]
+name = "app"
+modules = ["app"]
+depends_on = ["domain"]
+
+[[layer]]
+name = "infra"
+modules = ["infra"]
+depends_on = ["app"]
