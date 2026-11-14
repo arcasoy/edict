@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::model::{Edge, Exports, ExternRef, ModId, Module, ROOT, RawRef};
+use crate::model::{Edge, Exports, ExternRef, ModId, Module, ROOT, RawRef, Source};
 
 const MAX_DEPTH: usize = 32;
 
@@ -45,6 +45,7 @@ pub fn resolve(
             kind: rr.kind,
             path: display.join("::"),
             loc: rr.loc.clone(),
+            source: Source::Syntax,
         });
     }
     (edges, externs)

@@ -12,6 +12,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
     }
     let deny = cfg.purity.deny_list();
     let mut out = Vec::new();
+    // Both engines can report the same call; report it once.
+    let mut seen = std::collections::BTreeSet::new();
 
     for x in &a.externs {
         let Some(top) = a.top_of(x.from) else {
@@ -24,10 +26,10 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         if !layer.pure {
             continue;
         }
-        if let Some(d) = deny
+        let hit = deny
             .iter()
-            .find(|d| x.path == **d || x.path.starts_with(&format!("{d}::")))
-        {
+            .find(|d| x.path == **d || x.path.starts_with(&format!("{d}::")));
+        if let Some(d) = hit.filter(|_| seen.insert((x.from, x.path.clone(), x.loc.line))) {
             out.push(Violation {
                 rule: "purity",
                 severity,

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
-use crate::model::{Analysis, Edge, ModId, Note, Violation};
+use crate::model::{Analysis, Edge, ModId, Note, Source, Violation};
 
 const MAX_NOTES: usize = 5;
 
@@ -16,7 +16,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
     let mut seen = BTreeSet::new();
     let mut groups: BTreeMap<(ModId, ModId), Vec<&Edge>> = BTreeMap::new();
 
-    for e in &a.edges {
+    // Facades are about how a path is written, which only the syntax engine sees.
+    for e in a.edges.iter().filter(|e| e.source == Source::Syntax) {
         let Some(from_top) = a.top_of(e.from) else {
             continue;
         }; // crate root is the composition root

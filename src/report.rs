@@ -8,8 +8,12 @@ use crate::model::{Severity, Violation};
 pub struct CrateReport {
     #[serde(rename = "crate")]
     pub crate_name: String,
+    /// `fast` (syntax engine) or `full` (syntax + rust-analyzer).
+    pub mode: &'static str,
     pub modules: usize,
     pub edges: usize,
+    /// Full mode: file-to-file dependencies only rust-analyzer found.
+    pub semantic_only_edges: Option<usize>,
     pub warnings: Vec<String>,
     pub violations: Vec<Violation>,
 }
@@ -47,8 +51,13 @@ pub fn human(reports: &[CrateReport]) -> String {
         let (e, w) = (r.count(Severity::Error), r.count(Severity::Warning));
         errors += e;
         warnings += w;
+        let extra = match r.semantic_only_edges {
+            Some(n) => format!(", {n} found only by rust-analyzer"),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "edict: `{}`: {} error{}, {} warning{} ({} modules, {} edges)\n",
+            "edict ({}): `{}`: {} error{}, {} warning{} ({} modules, {} edges{extra})\n",
+            r.mode,
             r.crate_name,
             e,
             plural(e),

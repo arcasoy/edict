@@ -6,13 +6,17 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use std::collections::BTreeSet;
+
 use crate::config::{Config, TEMPLATE};
 use crate::extract::extract;
 use crate::load::{CrateRoot, find_crates, load_crate};
-use crate::model::{Analysis, Severity};
+use crate::model::{Analysis, Severity, Source};
 use crate::report::{self, CrateReport};
 use crate::resolve::resolve;
 use crate::rules;
+use crate::scip_index::{self, LoadedIndex};
+use crate::semantic::{self, IndexRoots, LineInfo};
 
 const CONFIG_FILE: &str = "edict.toml";
 
@@ -40,6 +44,27 @@ struct EdictArgs {
     /// Output format.
     #[arg(long, global = true, value_enum, default_value_t = Format::Human)]
     format: Format,
+
+    /// Full mode: also build the graph from rust-analyzer's SCIP index
+    /// (macros expanded, types inferred). Slower; use before push or in CI.
+    #[arg(long, global = true)]
+    full: bool,
+
+    /// Use an existing SCIP index instead of running rust-analyzer. Implies --full.
+    #[arg(long, global = true, value_name = "INDEX")]
+    scip: Option<PathBuf>,
+
+    /// Agent-hook output: silent on success; on errors, report to stderr and exit 2.
+    #[arg(long, global = true)]
+    hook: bool,
+}
+
+struct CheckOpts<'a> {
+    config: Option<&'a Path>,
+    format: Format,
+    full: bool,
+    scip: Option<&'a Path>,
+    hook: bool,
 }
 
 #[derive(Subcommand)]
@@ -67,7 +92,16 @@ pub fn main() -> ExitCode {
 
     match args.command.unwrap_or(Command::Check) {
         Command::Init => init(&args.path),
-        Command::Check => check(&args.path, args.config.as_deref(), args.format),
+        Command::Check => check(
+            &args.path,
+            &CheckOpts {
+                config: args.config.as_deref(),
+                format: args.format,
+                full: args.full || args.scip.is_some(),
+                scip: args.scip.as_deref(),
+                hook: args.hook,
+            },
+        ),
     }
 }
 
@@ -89,44 +123,52 @@ fn init(dir: &Path) -> ExitCode {
     }
 }
 
-fn check(dir: &Path, explicit_config: Option<&Path>, format: Format) -> ExitCode {
+fn check(dir: &Path, opts: &CheckOpts) -> ExitCode {
+    let fail = |msg: String| {
+        eprintln!("edict: {msg}");
+        ExitCode::from(if opts.hook { 2 } else { 3 })
+    };
     let crates = match find_crates(dir) {
-        Ok(c) if c.is_empty() => {
-            eprintln!("edict: no crates found in {}", dir.display());
-            return ExitCode::from(2);
-        }
+        Ok(c) if c.is_empty() => return fail(format!("no crates found in {}", dir.display())),
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("edict: {e}");
-            return ExitCode::from(2);
+        Err(e) => return fail(e),
+    };
+    // One index for the whole workspace, shared by every crate in it.
+    let index = if opts.full {
+        match scip_index::obtain(dir, opts.scip) {
+            Ok(i) => Some(i),
+            Err(e) => return fail(e),
         }
+    } else {
+        None
     };
 
     let mut reports = Vec::new();
     for root in &crates {
-        let cfg = match load_config(explicit_config, root, dir) {
+        let cfg = match load_config(opts.config, root, dir) {
             Ok(c) => c,
-            Err(e) => {
-                eprintln!("edict: {e}");
-                return ExitCode::from(2);
-            }
+            Err(e) => return fail(e),
         };
-        match analyze(root, &cfg) {
+        match analyze(root, &cfg, index.as_ref()) {
             Ok(r) => reports.push(r),
-            Err(e) => {
-                eprintln!("edict: {e}");
-                return ExitCode::from(2);
-            }
+            Err(e) => return fail(e),
         }
     }
 
-    let output = match format {
+    let failed = reports.iter().any(|r| r.count(Severity::Error) > 0);
+    let output = match opts.format {
         Format::Human => report::human(&reports),
         Format::Json => report::json(&reports),
     };
+    if opts.hook {
+        if failed {
+            eprintln!("{output}");
+            return ExitCode::from(2);
+        }
+        return ExitCode::SUCCESS;
+    }
     println!("{output}");
-
-    if reports.iter().any(|r| r.count(Severity::Error) > 0) {
+    if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -155,10 +197,35 @@ fn load_config(
     Ok(Config::default())
 }
 
-fn analyze(root: &CrateRoot, cfg: &Config) -> Result<CrateReport, String> {
+fn analyze(
+    root: &CrateRoot,
+    cfg: &Config,
+    index: Option<&LoadedIndex>,
+) -> Result<CrateReport, String> {
     let loaded = load_crate(root)?;
     let ex = extract(&loaded.modules, &loaded.items);
-    let (edges, externs) = resolve(&root.name, &loaded.modules, &ex.exports, &ex.raw);
+    let (mut edges, mut externs) = resolve(&root.name, &loaded.modules, &ex.exports, &ex.raw);
+
+    // Full mode = fast mode plus everything rust-analyzer finds. Union, never
+    // replace: full mode can only add findings, so a fast pass is a strict
+    // subset of a full pass.
+    let mut semantic_count = None;
+    if let Some(idx) = index {
+        let crate_dir = scip_index::canonical(&root.dir)?;
+        let roots = IndexRoots {
+            index_root: &idx.root,
+            crate_dir: &crate_dir,
+        };
+        let lines = LineInfo {
+            tests: &ex.test_lines,
+            reexports: &ex.reexport_lines,
+        };
+        let sem = semantic::from_index(&idx.index, &roots, &loaded.modules, &lines);
+        edges.extend(sem.edges);
+        externs.extend(sem.externs);
+        semantic_count = Some(0);
+    }
+
     let analysis = Analysis {
         crate_name: root.name.clone(),
         modules: loaded.modules,
@@ -167,13 +234,38 @@ fn analyze(root: &CrateRoot, cfg: &Config) -> Result<CrateReport, String> {
         statics: ex.statics,
         macros: ex.macros,
     };
+    if semantic_count.is_some() {
+        semantic_count = Some(semantic_only(&analysis));
+    }
     let mut violations = rules::run(&analysis, cfg);
     violations.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.rule.cmp(b.rule)));
     Ok(CrateReport {
         crate_name: analysis.crate_name.clone(),
+        mode: if index.is_some() { "full" } else { "fast" },
         modules: analysis.modules.len(),
         edges: analysis.edges.iter().filter(|e| e.from != e.to).count(),
+        semantic_only_edges: semantic_count,
         warnings: loaded.warnings,
         violations,
     })
+}
+
+/// File-to-file dependencies that only rust-analyzer found: a direct measure
+/// of what fast mode misses on this codebase.
+fn semantic_only(a: &Analysis) -> usize {
+    let pair = |from, to| (a.file_module_of(from), a.file_module_of(to));
+    let syntactic: BTreeSet<_> = a
+        .edges
+        .iter()
+        .filter(|e| e.source == Source::Syntax && !a.is_barrel(e))
+        .map(|e| pair(e.from, e.to))
+        .collect();
+    let semantic: BTreeSet<_> = a
+        .edges
+        .iter()
+        .filter(|e| e.source == Source::Semantic && !a.is_barrel(e))
+        .map(|e| pair(e.from, e.to))
+        .filter(|(f, t)| f != t)
+        .collect();
+    semantic.difference(&syntactic).count()
 }

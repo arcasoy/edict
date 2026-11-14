@@ -187,3 +187,108 @@ fn token_scan_sees_paths_in_non_expression_macros() {
         "`low` uses `crate::high::make`"
     );
 }
+
+fn rust_analyzer_available() -> bool {
+    Command::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[test]
+fn hook_mode_is_silent_on_success() {
+    let path = fixture("clean");
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-edict"))
+        .args(["edict", "--hook", "--path", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+}
+
+#[test]
+fn hook_mode_exits_2_with_report_on_stderr() {
+    let path = fixture("violations");
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-edict"))
+        .args(["edict", "--hook", "--path", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("error[cycles]"));
+}
+
+#[test]
+fn fast_mode_misses_cycle_through_inferred_method() {
+    let path = fixture("inferred");
+    let (code, text) = run(&["edict", "--path", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+}
+
+#[test]
+fn full_mode_finds_cycle_through_inferred_method() {
+    if !rust_analyzer_available() {
+        eprintln!("skipping: rust-analyzer not installed");
+        return;
+    }
+    let path = fixture("inferred");
+    let (code, text) = run(&["edict", "--full", "--path", path.to_str().unwrap()]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("module cycle: a -> c -> a"), "{text}");
+    assert!(
+        text.contains("crate::a::Widget::process (impl in crate::c)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("src/a.rs:4"),
+        "only the non-test call counts: {text}"
+    );
+    assert!(
+        !text.contains("src/a.rs:11"),
+        "test code is ignored: {text}"
+    );
+}
+
+#[test]
+fn full_mode_is_a_superset_of_fast_mode() {
+    if !rust_analyzer_available() {
+        eprintln!("skipping: rust-analyzer not installed");
+        return;
+    }
+    for name in ["clean", "violations", "gaps"] {
+        let path = fixture(name);
+        let fast = json(name);
+        let (_, text) = run(&[
+            "edict",
+            "--full",
+            "--format",
+            "json",
+            "--path",
+            path.to_str().unwrap(),
+        ]);
+        let full: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let msgs = |v: &serde_json::Value| -> Vec<String> {
+            v[0]["violations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["message"].as_str().unwrap().to_string())
+                .collect()
+        };
+        for m in msgs(&fast) {
+            assert!(msgs(&full).contains(&m), "{name}: full mode lost `{m}`");
+        }
+        assert_eq!(full[0]["mode"], "full");
+    }
+}
+
+#[test]
+fn edict_obeys_its_own_laws_in_full_mode() {
+    if !rust_analyzer_available() {
+        eprintln!("skipping: rust-analyzer not installed");
+        return;
+    }
+    let (code, text) = run(&["edict", "--full", "--path", env!("CARGO_MANIFEST_DIR")]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("0 errors, 0 warnings"), "{text}");
+}

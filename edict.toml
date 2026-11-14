@@ -18,13 +18,13 @@ pure = true
 
 [[layer]]
 name = "analysis"
-modules = ["extract", "resolve", "rules", "report"]
+modules = ["extract", "resolve", "rules", "report", "semantic"]
 depends_on = ["config"]
 pure = true
 
 [[layer]]
 name = "io"
-modules = ["load"]
+modules = ["load", "scip_index"]
 depends_on = ["core"]
 
 [[layer]]

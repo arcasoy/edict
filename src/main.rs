@@ -10,6 +10,8 @@ mod model;
 mod report;
 mod resolve;
 mod rules;
+mod scip_index;
+mod semantic;
 
 fn main() -> std::process::ExitCode {
     cli::main()

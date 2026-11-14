@@ -115,6 +115,17 @@ pub struct Edge {
     pub kind: RefKind,
     pub path: String,
     pub loc: Loc,
+    pub source: Source,
+}
+
+/// Which engine found an edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// Fast mode: paths as written in the source.
+    Syntax,
+    /// Full mode: rust-analyzer's SCIP index (macros expanded, types inferred).
+    Semantic,
 }
 
 /// A reference to something outside the crate (std, tokio, ...).

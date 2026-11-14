@@ -3,6 +3,7 @@
 //! Pure: operates on already-parsed `syn` items.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use proc_macro2::{Spacing, Span, TokenTree};
 use quote::ToTokens;
@@ -14,6 +15,12 @@ use crate::attrs::{is_test_fn, is_test_only};
 use crate::model::{Exports, Loc, MacroUse, ModId, Module, RawRef, Reexport, RefKind, StaticItem};
 
 pub struct Extracted {
+    /// Line ranges (1-based, inclusive) of test-only code per file, so the
+    /// semantic engine can ignore references inside tests too.
+    pub test_lines: BTreeMap<PathBuf, Vec<(usize, usize)>>,
+    /// Line ranges of `pub use` statements per file: references on these
+    /// lines are re-exports, not dependencies of the re-exporting module.
+    pub reexport_lines: BTreeMap<PathBuf, Vec<(usize, usize)>>,
     pub exports: Vec<Exports>,
     pub raw: Vec<RawRef>,
     pub statics: Vec<StaticItem>,
@@ -22,6 +29,8 @@ pub struct Extracted {
 
 pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
     let mut out = Extracted {
+        test_lines: BTreeMap::new(),
+        reexport_lines: BTreeMap::new(),
         exports: vec![Exports::default(); modules.len()],
         raw: Vec::new(),
         statics: Vec::new(),
@@ -47,6 +56,7 @@ pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
             globs: Vec::new(),
             raw: Vec::new(),
             reexports: Vec::new(),
+            reexport_ranges: Vec::new(),
         };
         for item in module_items {
             uses.visit_item(item);
@@ -58,6 +68,7 @@ pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
             imports: &uses.imports,
             globs: &uses.globs,
             in_call: false,
+            test_ranges: Vec::new(),
             raw: Vec::new(),
             statics: Vec::new(),
             macros: Vec::new(),
@@ -72,6 +83,14 @@ pub fn extract(modules: &[Module], items: &[Vec<syn::Item>]) -> Extracted {
         };
         out.raw.extend(uses.raw);
         out.raw.extend(paths.raw);
+        out.test_lines
+            .entry(modules[id].file.clone())
+            .or_default()
+            .extend(paths.test_ranges);
+        out.reexport_lines
+            .entry(modules[id].file.clone())
+            .or_default()
+            .extend(uses.reexport_ranges);
         out.statics.extend(paths.statics);
         out.macros.extend(paths.macros);
     }
@@ -187,6 +206,7 @@ struct UseCollector<'a> {
     globs: Vec<Vec<String>>,
     raw: Vec<RawRef>,
     reexports: Vec<Reexport>,
+    reexport_ranges: Vec<(usize, usize)>,
 }
 
 impl<'ast> Visit<'ast> for UseCollector<'_> {
@@ -212,6 +232,9 @@ impl<'ast> Visit<'ast> for UseCollector<'_> {
             RefKind::Use
         };
         let loc = self.scope.loc(u.use_token.span);
+        if is_pub {
+            self.reexport_ranges.push(line_range(u));
+        }
         let mut leaves = Vec::new();
         flatten_use(&u.tree, &mut Vec::new(), &mut leaves);
 
@@ -260,6 +283,7 @@ struct PathCollector<'a> {
     globs: &'a [Vec<String>],
     /// The next path visited is the callee of a call expression.
     in_call: bool,
+    test_ranges: Vec<(usize, usize)>,
     raw: Vec<RawRef>,
     statics: Vec<StaticItem>,
     macros: Vec<MacroUse>,
@@ -374,7 +398,9 @@ fn is_path_sep(toks: &[TokenTree], i: usize) -> bool {
 
 impl<'ast> Visit<'ast> for PathCollector<'_> {
     fn visit_item(&mut self, i: &'ast syn::Item) {
-        if !is_test_only(item_attrs(i)) {
+        if is_test_only(item_attrs(i)) {
+            self.test_ranges.push(line_range(i));
+        } else {
             visit::visit_item(self, i);
         }
     }
@@ -384,7 +410,9 @@ impl<'ast> Visit<'ast> for PathCollector<'_> {
     fn visit_item_use(&mut self, _: &'ast syn::ItemUse) {}
 
     fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-        if !is_test_fn(&f.attrs) {
+        if is_test_fn(&f.attrs) {
+            self.test_ranges.push(line_range(f));
+        } else {
             visit::visit_impl_item_fn(self, f);
         }
     }
@@ -460,6 +488,23 @@ impl<'ast> Visit<'ast> for PathCollector<'_> {
         // (`matches!`, `vec![x; n]`, DSLs, `$crate::` in macro_rules bodies).
         self.scan_tokens(mac.tokens.clone());
     }
+}
+
+/// First and last line covered by a syntax node's tokens.
+fn line_range(node: &impl ToTokens) -> (usize, usize) {
+    fn walk(ts: proc_macro2::TokenStream, lo: &mut usize, hi: &mut usize) {
+        for tt in ts {
+            let span = tt.span();
+            *lo = (*lo).min(span.start().line);
+            *hi = (*hi).max(span.end().line);
+            if let TokenTree::Group(g) = tt {
+                walk(g.stream(), lo, hi);
+            }
+        }
+    }
+    let (mut lo, mut hi) = (usize::MAX, 0);
+    walk(node.to_token_stream(), &mut lo, &mut hi);
+    (lo, hi)
 }
 
 fn item_name(item: &syn::Item) -> Option<String> {
