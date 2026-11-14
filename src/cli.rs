@@ -147,8 +147,17 @@ fn check(dir: &Path, opts: &CheckOpts) -> ExitCode {
         ExitCode::from(if opts.hook { 2 } else { 3 })
     };
     let crates = match find_crates(dir) {
-        Ok(c) if c.is_empty() => return fail(format!("no crates found in {}", dir.display())),
-        Ok(c) => c,
+        Ok(f) if f.crates.is_empty() => {
+            return fail(format!("no crates found in {}", dir.display()));
+        }
+        Ok(f) => {
+            if !opts.hook {
+                for note in &f.notes {
+                    eprintln!("edict: note: {note}");
+                }
+            }
+            f.crates
+        }
         Err(e) => return fail(e),
     };
     // One index for the whole workspace, shared by every crate in it.
@@ -290,8 +299,17 @@ fn graph(dir: &Path, out: &Path, opts: &CheckOpts) -> ExitCode {
         ExitCode::from(3)
     };
     let crates = match find_crates(dir) {
-        Ok(c) if c.is_empty() => return fail(format!("no crates found in {}", dir.display())),
-        Ok(c) => c,
+        Ok(f) if f.crates.is_empty() => {
+            return fail(format!("no crates found in {}", dir.display()));
+        }
+        Ok(f) => {
+            if !opts.hook {
+                for note in &f.notes {
+                    eprintln!("edict: note: {note}");
+                }
+            }
+            f.crates
+        }
         Err(e) => return fail(e),
     };
     let index = if opts.full {
