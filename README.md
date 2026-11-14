@@ -50,7 +50,7 @@ cargo edict          # fast check (exit 1 on errors)
 ```
 
 Options: `--path <dir>` (crate or workspace), `--config <file>`, `--format json`,
-`--full`, `--scip <index>`, `--hook`. Workspaces are expanded automatically. Each
+`--full`, `--scip <index>`, `--hook`. Subcommands: `check` (default), `init`, `graph`. Workspaces are expanded automatically. Each
 member uses its own `edict.toml`, falling back to the workspace root's.
 
 ## Two modes
@@ -77,6 +77,26 @@ about how a path is *written*, and global state is a property of declarations.
 
 If your repo already maintains SCIP indexes, skip the indexing step:
 `cargo edict --scip path/to/index.scip`.
+
+## Seeing the graph
+
+```sh
+cargo edict graph            # writes edict-graph.html
+cargo edict graph --full     # include dependencies only rust-analyzer finds
+```
+
+One self-contained HTML file, no server or network needed. Drag to pan,
+scroll or pinch to zoom, tap a module to see what it depends on and what uses
+it, with the exact paths and lines behind each arrow.
+
+- **Modules / Files** toggle between top-level modules and individual files.
+- Rows are dependency depth: things that depend on nothing sit at the bottom.
+- Nodes carry their layer's color; red borders are modules in a cycle.
+- Red arrows are cycle edges, orange are layer violations, dashed are
+  dependencies only rust-analyzer found. **Problems only** fades everything else.
+
+Useful for drafting layers: put each row-band in a layer, then fix the red and
+orange.
 
 ## Hooking it up to an agent
 

@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 use crate::config::{Config, TEMPLATE};
 use crate::extract::extract;
+use crate::graph_view;
 use crate::load::{CrateRoot, find_crates, load_crate};
 use crate::model::{Analysis, Severity, Source};
 use crate::report::{self, CrateReport};
@@ -73,6 +74,12 @@ enum Command {
     Check,
     /// Write a starter edict.toml.
     Init,
+    /// Write an interactive HTML map of the module graph.
+    Graph {
+        /// Output file. In a workspace, one file per crate: `<stem>-<crate>.html`.
+        #[arg(long, default_value = "edict-graph.html")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -92,6 +99,17 @@ pub fn main() -> ExitCode {
 
     match args.command.unwrap_or(Command::Check) {
         Command::Init => init(&args.path),
+        Command::Graph { out } => graph(
+            &args.path,
+            &out,
+            &CheckOpts {
+                config: args.config.as_deref(),
+                format: args.format,
+                full: args.full || args.scip.is_some(),
+                scip: args.scip.as_deref(),
+                hook: false,
+            },
+        ),
         Command::Check => check(
             &args.path,
             &CheckOpts {
@@ -197,11 +215,14 @@ fn load_config(
     Ok(Config::default())
 }
 
-fn analyze(
-    root: &CrateRoot,
-    cfg: &Config,
-    index: Option<&LoadedIndex>,
-) -> Result<CrateReport, String> {
+struct Built {
+    analysis: Analysis,
+    warnings: Vec<String>,
+    /// Full mode only: file-to-file dependencies only rust-analyzer found.
+    semantic_only: Option<usize>,
+}
+
+fn build(root: &CrateRoot, index: Option<&LoadedIndex>) -> Result<Built, String> {
     let loaded = load_crate(root)?;
     let ex = extract(&loaded.modules, &loaded.items);
     let (mut edges, mut externs) = resolve(&root.name, &loaded.modules, &ex.exports, &ex.raw);
@@ -209,7 +230,6 @@ fn analyze(
     // Full mode = fast mode plus everything rust-analyzer finds. Union, never
     // replace: full mode can only add findings, so a fast pass is a strict
     // subset of a full pass.
-    let mut semantic_count = None;
     if let Some(idx) = index {
         let crate_dir = scip_index::canonical(&root.dir)?;
         let roots = IndexRoots {
@@ -223,7 +243,6 @@ fn analyze(
         let sem = semantic::from_index(&idx.index, &roots, &loaded.modules, &lines);
         edges.extend(sem.edges);
         externs.extend(sem.externs);
-        semantic_count = Some(0);
     }
 
     let analysis = Analysis {
@@ -234,9 +253,24 @@ fn analyze(
         statics: ex.statics,
         macros: ex.macros,
     };
-    if semantic_count.is_some() {
-        semantic_count = Some(semantic_only(&analysis));
-    }
+    let semantic_only = index.map(|_| semantic_only(&analysis));
+    Ok(Built {
+        analysis,
+        warnings: loaded.warnings,
+        semantic_only,
+    })
+}
+
+fn analyze(
+    root: &CrateRoot,
+    cfg: &Config,
+    index: Option<&LoadedIndex>,
+) -> Result<CrateReport, String> {
+    let Built {
+        analysis,
+        warnings,
+        semantic_only,
+    } = build(root, index)?;
     let mut violations = rules::run(&analysis, cfg);
     violations.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.rule.cmp(b.rule)));
     Ok(CrateReport {
@@ -244,10 +278,54 @@ fn analyze(
         mode: if index.is_some() { "full" } else { "fast" },
         modules: analysis.modules.len(),
         edges: analysis.edges.iter().filter(|e| e.from != e.to).count(),
-        semantic_only_edges: semantic_count,
-        warnings: loaded.warnings,
+        semantic_only_edges: semantic_only,
+        warnings,
         violations,
     })
+}
+
+fn graph(dir: &Path, out: &Path, opts: &CheckOpts) -> ExitCode {
+    let fail = |msg: String| {
+        eprintln!("edict: {msg}");
+        ExitCode::from(3)
+    };
+    let crates = match find_crates(dir) {
+        Ok(c) if c.is_empty() => return fail(format!("no crates found in {}", dir.display())),
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let index = if opts.full {
+        match scip_index::obtain(dir, opts.scip) {
+            Ok(i) => Some(i),
+            Err(e) => return fail(e),
+        }
+    } else {
+        None
+    };
+    for root in &crates {
+        let cfg = match load_config(opts.config, root, dir) {
+            Ok(c) => c,
+            Err(e) => return fail(e),
+        };
+        let built = match build(root, index.as_ref()) {
+            Ok(b) => b,
+            Err(e) => return fail(e),
+        };
+        let path = if crates.len() == 1 {
+            out.to_path_buf()
+        } else {
+            let stem = out
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("edict-graph");
+            out.with_file_name(format!("{stem}-{}.html", root.name))
+        };
+        if let Err(e) = fs::write(&path, graph_view::render(&built.analysis, &cfg)) {
+            return fail(format!("cannot write {}: {e}", path.display()));
+        }
+        println!("edict: wrote {}", path.display());
+    }
+    ExitCode::SUCCESS
 }
 
 /// File-to-file dependencies that only rust-analyzer found: a direct measure

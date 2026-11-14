@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod extract;
 mod graph;
+mod graph_view;
 mod load;
 mod model;
 mod report;

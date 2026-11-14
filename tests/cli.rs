@@ -292,3 +292,47 @@ fn edict_obeys_its_own_laws_in_full_mode() {
     assert_eq!(code, 0, "{text}");
     assert!(text.contains("0 errors, 0 warnings"), "{text}");
 }
+
+#[test]
+fn graph_writes_interactive_page() {
+    let dir = std::env::temp_dir().join(format!("edict-graph-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("g.html");
+    let path = fixture("violations");
+    let (code, text) = run(&[
+        "edict",
+        "graph",
+        "--path",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let html = std::fs::read_to_string(&out).unwrap();
+    let start = html.find("const DATA = ").unwrap() + "const DATA = ".len();
+    let end = start + html[start..].find(";\n").unwrap();
+    let data: serde_json::Value =
+        serde_json::from_str(&html[start..end].replace("<\\/", "</")).unwrap();
+    let files = &data["views"]["file"];
+    let name = |i: &serde_json::Value| {
+        files["nodes"][i.as_u64().unwrap() as usize]["name"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let edges = files["edges"].as_array().unwrap();
+    let cycle: Vec<(String, String)> = edges
+        .iter()
+        .filter(|e| e["cycle"] == true)
+        .map(|e| (name(&e["from"]), name(&e["to"])))
+        .collect();
+    assert!(
+        cycle.contains(&("billing::invoice".into(), "billing::tax".into())),
+        "{cycle:?}"
+    );
+    assert!(edges.iter().any(|e| e["layerViolation"] == true
+        && name(&e["from"]) == "domain"
+        && name(&e["to"]) == "infra"));
+    assert_eq!(data["layers"].as_array().unwrap().len(), 3);
+    std::fs::remove_dir_all(&dir).ok();
+}
