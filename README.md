@@ -43,7 +43,8 @@ correctness problem, so it only warns.
 ## Install
 
 ```sh
-cargo install cargo-edict
+cargo install --git https://github.com/arcasoy/edict   # not on crates.io yet
+rustup component add rust-analyzer                     # only needed for --full
 cargo edict init     # writes a commented edict.toml
 cargo edict          # fast check (exit 1 on errors)
 ```
