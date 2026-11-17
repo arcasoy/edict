@@ -6,20 +6,14 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
-use crate::config::{Config, TEMPLATE};
-use crate::extract::extract;
+use crate::baseline::{self, Baseline};
+use crate::config::TEMPLATE;
 use crate::graph_view;
-use crate::load::{CrateRoot, find_crates, load_crate};
-use crate::model::{Analysis, Severity, Source};
+use crate::model::Severity;
+use crate::pipeline;
 use crate::report::{self, CrateReport};
-use crate::resolve::resolve;
-use crate::rules;
-use crate::scip_index::{self, LoadedIndex};
-use crate::semantic::{self, IndexRoots, LineInfo};
-
-const CONFIG_FILE: &str = "edict.toml";
 
 #[derive(Parser)]
 #[command(name = "cargo", bin_name = "cargo")]
@@ -58,6 +52,19 @@ struct EdictArgs {
     /// Agent-hook output: silent on success; on errors, report to stderr and exit 2.
     #[arg(long, global = true)]
     hook: bool,
+
+    /// Baseline file (default: edict-baseline.json in --path). Violations it
+    /// records are tolerated; only new ones fail.
+    #[arg(long, global = true, value_name = "FILE")]
+    baseline: Option<PathBuf>,
+
+    /// Ignore the baseline: report and fail on every violation.
+    #[arg(long, global = true)]
+    no_baseline: bool,
+
+    /// Also list baselined violations (they still don't fail the check).
+    #[arg(long, global = true)]
+    show_baselined: bool,
 }
 
 struct CheckOpts<'a> {
@@ -66,6 +73,20 @@ struct CheckOpts<'a> {
     full: bool,
     scip: Option<&'a Path>,
     hook: bool,
+    /// Baseline file to use, or `None` to ignore baselines.
+    baseline: Option<PathBuf>,
+    show_baselined: bool,
+}
+
+impl CheckOpts<'_> {
+    fn settings(&self) -> pipeline::Settings<'_> {
+        pipeline::Settings {
+            config: self.config,
+            full: self.full,
+            scip: self.scip,
+            quiet: self.hook,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -74,6 +95,14 @@ enum Command {
     Check,
     /// Write a starter edict.toml.
     Init,
+    /// Record current violations so only new ones fail. Re-running only
+    /// drops fixed entries (a ratchet); it never adds new ones unless
+    /// --accept-new.
+    Baseline {
+        /// Also record violations the existing baseline doesn't cover.
+        #[arg(long)]
+        accept_new: bool,
+    },
     /// Write an interactive HTML map of the module graph.
     Graph {
         /// Output file. In a workspace, one file per crate: `<stem>-<crate>.html`.
@@ -97,34 +126,38 @@ pub fn main() -> ExitCode {
     }
     let Cargo::Edict(args) = Cargo::parse_from(args);
 
+    let baseline_path = args
+        .baseline
+        .clone()
+        .unwrap_or_else(|| args.path.join(baseline::FILE_NAME));
+    let opts = CheckOpts {
+        config: args.config.as_deref(),
+        format: args.format,
+        full: args.full || args.scip.is_some(),
+        scip: args.scip.as_deref(),
+        hook: args.hook,
+        baseline: (!args.no_baseline).then_some(baseline_path.clone()),
+        show_baselined: args.show_baselined,
+    };
     match args.command.unwrap_or(Command::Check) {
         Command::Init => init(&args.path),
+        Command::Check => check(&args.path, &opts),
+        Command::Baseline { accept_new } => {
+            record_baseline(&args.path, &opts, &baseline_path, accept_new)
+        }
         Command::Graph { out } => graph(
             &args.path,
             &out,
             &CheckOpts {
-                config: args.config.as_deref(),
-                format: args.format,
-                full: args.full || args.scip.is_some(),
-                scip: args.scip.as_deref(),
                 hook: false,
-            },
-        ),
-        Command::Check => check(
-            &args.path,
-            &CheckOpts {
-                config: args.config.as_deref(),
-                format: args.format,
-                full: args.full || args.scip.is_some(),
-                scip: args.scip.as_deref(),
-                hook: args.hook,
+                ..opts
             },
         ),
     }
 }
 
 fn init(dir: &Path) -> ExitCode {
-    let path = dir.join(CONFIG_FILE);
+    let path = dir.join(pipeline::CONFIG_FILE);
     if path.exists() {
         eprintln!("edict: {} already exists", path.display());
         return ExitCode::FAILURE;
@@ -141,50 +174,43 @@ fn init(dir: &Path) -> ExitCode {
     }
 }
 
+/// Analyze every crate under `dir` and run the laws.
+fn collect(dir: &Path, opts: &CheckOpts) -> Result<Vec<CrateReport>, String> {
+    Ok(pipeline::build_all(dir, &opts.settings())?
+        .iter()
+        .map(pipeline::report)
+        .collect())
+}
+
 fn check(dir: &Path, opts: &CheckOpts) -> ExitCode {
     let fail = |msg: String| {
         eprintln!("edict: {msg}");
         ExitCode::from(if opts.hook { 2 } else { 3 })
     };
-    let crates = match find_crates(dir) {
-        Ok(f) if f.crates.is_empty() => {
-            return fail(format!("no crates found in {}", dir.display()));
-        }
-        Ok(f) => {
-            if !opts.hook {
-                for note in &f.notes {
-                    eprintln!("edict: note: {note}");
-                }
-            }
-            f.crates
-        }
+    let mut reports = match collect(dir, opts) {
+        Ok(r) => r,
         Err(e) => return fail(e),
     };
-    // One index for the whole workspace, shared by every crate in it.
-    let index = if opts.full {
-        match scip_index::obtain(dir, opts.scip) {
-            Ok(i) => Some(i),
-            Err(e) => return fail(e),
-        }
-    } else {
-        None
-    };
 
-    let mut reports = Vec::new();
-    for root in &crates {
-        let cfg = match load_config(opts.config, root, dir) {
-            Ok(c) => c,
+    if let Some(path) = opts.baseline.as_ref().filter(|p| p.exists()) {
+        let parsed = fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            .and_then(|src| Baseline::parse(&src).map_err(|e| format!("{}: {e}", path.display())));
+        let base = match parsed {
+            Ok(b) => b,
             Err(e) => return fail(e),
         };
-        match analyze(root, &cfg, index.as_ref()) {
-            Ok(r) => reports.push(r),
-            Err(e) => return fail(e),
+        let empty = baseline::Entries::new();
+        for r in &mut reports {
+            let entries = base.crates.get(&r.crate_name).unwrap_or(&empty);
+            r.stale = baseline::apply(entries, &mut r.violations);
+            r.baselined = r.violations.iter().filter(|v| v.baselined).count();
         }
     }
 
     let failed = reports.iter().any(|r| r.count(Severity::Error) > 0);
     let output = match opts.format {
-        Format::Human => report::human(&reports),
+        Format::Human => report::human(&reports, opts.show_baselined),
         Format::Json => report::json(&reports),
     };
     if opts.hook {
@@ -202,167 +228,125 @@ fn check(dir: &Path, opts: &CheckOpts) -> ExitCode {
     }
 }
 
-fn load_config(
-    explicit: Option<&Path>,
-    root: &CrateRoot,
-    workspace: &Path,
-) -> Result<Config, String> {
-    let candidates: Vec<PathBuf> = match explicit {
-        Some(p) => vec![p.to_path_buf()],
-        None => vec![root.dir.join(CONFIG_FILE), workspace.join(CONFIG_FILE)],
-    };
-    for path in candidates {
-        if path.exists() {
-            let src = fs::read_to_string(&path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            return Config::parse(&src).map_err(|e| format!("{}: {e}", path.display()));
-        }
-    }
-    if let Some(p) = explicit {
-        return Err(format!("config {} not found", p.display()));
-    }
-    Ok(Config::default())
-}
-
-struct Built {
-    analysis: Analysis,
-    warnings: Vec<String>,
-    /// Full mode only: file-to-file dependencies only rust-analyzer found.
-    semantic_only: Option<usize>,
-}
-
-fn build(root: &CrateRoot, index: Option<&LoadedIndex>) -> Result<Built, String> {
-    let loaded = load_crate(root)?;
-    let ex = extract(&loaded.modules, &loaded.items);
-    let (mut edges, mut externs) = resolve(&root.name, &loaded.modules, &ex.exports, &ex.raw);
-
-    // Full mode = fast mode plus everything rust-analyzer finds. Union, never
-    // replace: full mode can only add findings, so a fast pass is a strict
-    // subset of a full pass.
-    if let Some(idx) = index {
-        let crate_dir = scip_index::canonical(&root.dir)?;
-        let roots = IndexRoots {
-            index_root: &idx.root,
-            crate_dir: &crate_dir,
-        };
-        let lines = LineInfo {
-            tests: &ex.test_lines,
-            reexports: &ex.reexport_lines,
-        };
-        let sem = semantic::from_index(&idx.index, &roots, &loaded.modules, &lines);
-        edges.extend(sem.edges);
-        externs.extend(sem.externs);
-    }
-
-    let analysis = Analysis {
-        crate_name: root.name.clone(),
-        is_lib: root.is_lib,
-        modules: loaded.modules,
-        edges,
-        externs,
-        statics: ex.statics,
-        macros: ex.macros,
-    };
-    let semantic_only = index.map(|_| semantic_only(&analysis));
-    Ok(Built {
-        analysis,
-        warnings: loaded.warnings,
-        semantic_only,
-    })
-}
-
-fn analyze(
-    root: &CrateRoot,
-    cfg: &Config,
-    index: Option<&LoadedIndex>,
-) -> Result<CrateReport, String> {
-    let Built {
-        analysis,
-        warnings,
-        semantic_only,
-    } = build(root, index)?;
-    let mut violations = rules::run(&analysis, cfg);
-    violations.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.rule.cmp(b.rule)));
-    Ok(CrateReport {
-        crate_name: analysis.crate_name.clone(),
-        mode: if index.is_some() { "full" } else { "fast" },
-        modules: analysis.modules.len(),
-        edges: analysis.edges.iter().filter(|e| e.from != e.to).count(),
-        semantic_only_edges: semantic_only,
-        warnings,
-        violations,
-    })
-}
-
-fn graph(dir: &Path, out: &Path, opts: &CheckOpts) -> ExitCode {
+fn record_baseline(dir: &Path, opts: &CheckOpts, path: &Path, accept_new: bool) -> ExitCode {
     let fail = |msg: String| {
         eprintln!("edict: {msg}");
         ExitCode::from(3)
     };
-    let crates = match find_crates(dir) {
-        Ok(f) if f.crates.is_empty() => {
-            return fail(format!("no crates found in {}", dir.display()));
-        }
-        Ok(f) => {
-            if !opts.hook {
-                for note in &f.notes {
-                    eprintln!("edict: note: {note}");
-                }
-            }
-            f.crates
-        }
+    let reports = match collect(dir, opts) {
+        Ok(r) => r,
         Err(e) => return fail(e),
     };
-    let index = if opts.full {
-        match scip_index::obtain(dir, opts.scip) {
-            Ok(i) => Some(i),
-            Err(e) => return fail(e),
+    let current: BTreeMap<String, baseline::Entries> = reports
+        .iter()
+        .map(|r| (r.crate_name.clone(), baseline::record(&r.violations)))
+        .collect();
+    let total = |b: &BTreeMap<String, baseline::Entries>| -> usize {
+        b.values().flat_map(|e| e.values()).sum()
+    };
+
+    let old = if path.exists() {
+        match fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| Baseline::parse(&s))
+        {
+            Ok(b) => Some(b),
+            Err(e) => return fail(format!("{}: {e}", path.display())),
         }
     } else {
         None
     };
-    for root in &crates {
-        let cfg = match load_config(opts.config, root, dir) {
-            Ok(c) => c,
-            Err(e) => return fail(e),
-        };
-        let built = match build(root, index.as_ref()) {
-            Ok(b) => b,
-            Err(e) => return fail(e),
-        };
-        let path = if crates.len() == 1 {
-            out.to_path_buf()
-        } else {
-            let stem = out
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("edict-graph");
-            out.with_file_name(format!("{stem}-{}.html", root.name))
-        };
-        if let Err(e) = fs::write(&path, graph_view::render(&built.analysis, &cfg)) {
-            return fail(format!("cannot write {}: {e}", path.display()));
+
+    let next = match (&old, accept_new) {
+        (Some(old), false) => {
+            let empty = baseline::Entries::new();
+            let mut next = BTreeMap::new();
+            let mut new_findings = Vec::new();
+            for r in &reports {
+                let (entries, added) = baseline::ratchet(
+                    old.crates.get(&r.crate_name).unwrap_or(&empty),
+                    &current[&r.crate_name],
+                );
+                for key in added {
+                    if let Some(v) = r.violations.iter().find(|v| v.key == key) {
+                        new_findings.push(format!(
+                            "`{}`: {}[{}]: {}",
+                            r.crate_name,
+                            label(v.severity),
+                            v.rule,
+                            v.message
+                        ));
+                    }
+                }
+                if !entries.is_empty() {
+                    next.insert(r.crate_name.clone(), entries);
+                }
+            }
+            if !new_findings.is_empty() {
+                eprintln!("edict: these violations aren't in the baseline, so it was not changed:");
+                for f in &new_findings {
+                    eprintln!("  {f}");
+                }
+                eprintln!("edict: fix them, or rerun with --accept-new to record them");
+                return ExitCode::FAILURE;
+            }
+            next
         }
-        println!("edict: wrote {}", path.display());
+        _ => current.into_iter().filter(|(_, e)| !e.is_empty()).collect(),
+    };
+
+    if let Err(e) = fs::write(path, Baseline::new(next.clone()).render()) {
+        return fail(format!("cannot write {}: {e}", path.display()));
+    }
+    match old {
+        Some(old) => {
+            let (before, after) = (total(&old.crates), total(&next));
+            println!(
+                "edict: baseline {}: {after} recorded violations ({} fixed since last time)",
+                path.display(),
+                before.saturating_sub(after)
+            );
+        }
+        None => println!(
+            "edict: wrote {}: {} recorded violations",
+            path.display(),
+            total(&next)
+        ),
     }
     ExitCode::SUCCESS
 }
 
-/// File-to-file dependencies that only rust-analyzer found: a direct measure
-/// of what fast mode misses on this codebase.
-fn semantic_only(a: &Analysis) -> usize {
-    let pair = |from, to| (a.file_module_of(from), a.file_module_of(to));
-    let syntactic: BTreeSet<_> = a
-        .edges
-        .iter()
-        .filter(|e| e.source == Source::Syntax && !a.is_barrel(e))
-        .map(|e| pair(e.from, e.to))
-        .collect();
-    let semantic: BTreeSet<_> = a
-        .edges
-        .iter()
-        .filter(|e| e.source == Source::Semantic && !a.is_barrel(e))
-        .map(|e| pair(e.from, e.to))
-        .filter(|(f, t)| f != t)
-        .collect();
-    semantic.difference(&syntactic).count()
+fn label(s: Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
+}
+
+fn graph(dir: &Path, out: &Path, opts: &CheckOpts) -> ExitCode {
+    let built = match pipeline::build_all(dir, &opts.settings()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("edict: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let many = built.len() > 1;
+    for b in &built {
+        let path = if many {
+            let stem = out
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("edict-graph");
+            out.with_file_name(format!("{stem}-{}.html", b.analysis.crate_name))
+        } else {
+            out.to_path_buf()
+        };
+        if let Err(e) = fs::write(&path, graph_view::render(&b.analysis, &b.config)) {
+            eprintln!("edict: cannot write {}: {e}", path.display());
+            return ExitCode::from(3);
+        }
+        println!("edict: wrote {}", path.display());
+    }
+    ExitCode::SUCCESS
 }

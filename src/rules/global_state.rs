@@ -40,6 +40,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         if let Some(why) = why {
             out.push(Violation {
                 rule: "global-state",
+                key: format!("global-state:{}:{}", a.name(s.module), s.name),
+                baselined: false,
                 severity,
                 message: format!(
                     "global mutable state: static `{}` in `{}` {why}",
@@ -65,6 +67,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         if let Some(why) = why {
             out.push(Violation {
                 rule: "global-state",
+                key: format!("global-state:{}:{}!", a.name(m.module), m.name),
+                baselined: false,
                 severity,
                 message: format!("global mutable state: {why} in `{}`", a.name(m.module)),
                 notes: vec![Note {

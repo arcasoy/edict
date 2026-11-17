@@ -32,6 +32,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         if let Some(d) = hit.filter(|_| seen.insert((x.from, x.path.clone(), x.loc.line))) {
             out.push(Violation {
                 rule: "purity",
+                key: format!("purity:{}:{}", a.name(x.from), x.path),
+                baselined: false,
                 severity,
                 message: format!(
                     "`{}` is in pure layer `{}` but uses `{}` (denied: `{d}`)",

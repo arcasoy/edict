@@ -21,6 +21,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         for m in layer.modules.iter().filter(|m| !tops.contains_key(*m)) {
             out.push(Violation {
                 rule: "layers",
+                key: format!("layers:unknown-module:{}:{m}", layer.name),
+                baselined: false,
                 severity,
                 message: format!(
                     "layer `{}` lists module `{m}`, which is not a top-level module of this crate",
@@ -36,6 +38,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
             if cfg.layer_of(name).is_none() {
                 out.push(Violation {
                     rule: "layers",
+                    key: format!("layers:unassigned:{name}"),
+                    baselined: false,
                     severity,
                     message: format!("top-level module `{name}` is not assigned to any layer"),
                     notes: vec![Note {
@@ -87,6 +91,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         }
         out.push(Violation {
             rule: "layers",
+            key: format!("layers:{}->{}", a.name(ft), a.name(tt)),
+            baselined: false,
             severity,
             message: format!(
                 "`{}` (layer `{lf}`) depends on `{}` (layer `{lt}`), but `{lf}` may not depend on `{lt}`",

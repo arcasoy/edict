@@ -55,6 +55,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         }
         Violation {
             rule: "facade",
+            key: format!("facade:reach:{}->{}", a.name(from), a.name(into)),
+            baselined: false,
             severity,
             message: format!(
                 "`{}` reaches into `{}`; use what `{}` exports at its root",
@@ -87,6 +89,8 @@ fn visibility(a: &Analysis, cfg: &Config, severity: crate::model::Severity) -> V
         if leaks {
             out.push(Violation {
                 rule: "facade",
+                key: format!("facade:visibility:{}", a.name(m)),
+                baselined: false,
                 severity,
                 message: format!(
                     "`{}` is declared `{}`, making it visible outside `{}`",

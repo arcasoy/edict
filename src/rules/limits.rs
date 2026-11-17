@@ -18,6 +18,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
     {
         out.push(Violation {
             rule: "limits",
+            key: format!("limits:lines:{}", m.display()),
+            baselined: false,
             severity,
             message: format!(
                 "`{}` has {} lines (max {})",
@@ -49,6 +51,8 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
         let names: Vec<String> = targets.iter().map(|&t| a.name(t)).collect();
         out.push(Violation {
             rule: "limits",
+            key: format!("limits:fan-out:{}", a.name(m)),
+            baselined: false,
             severity,
             message: format!(
                 "`{}` depends on {} modules (max {}): {}",

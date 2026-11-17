@@ -1,6 +1,7 @@
 //! `cargo edict`: deterministic architecture laws for Rust crates.
 
 mod attrs;
+mod baseline;
 mod cli;
 mod config;
 mod extract;
@@ -8,6 +9,7 @@ mod graph;
 mod graph_view;
 mod load;
 mod model;
+mod pipeline;
 mod report;
 mod resolve;
 mod rules;

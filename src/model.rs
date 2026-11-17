@@ -282,7 +282,12 @@ pub struct Note {
 #[derive(Debug, Clone, Serialize)]
 pub struct Violation {
     pub rule: &'static str,
+    /// Stable identity for baselines: no line numbers or counts, so it
+    /// survives unrelated edits. Cycles are `cycles:<member,member,...>`.
+    pub key: String,
     pub severity: Severity,
     pub message: String,
     pub notes: Vec<Note>,
+    /// Recorded in the baseline: reported, but does not fail the check.
+    pub baselined: bool,
 }

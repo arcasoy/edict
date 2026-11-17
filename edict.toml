@@ -18,7 +18,7 @@ pure = true
 
 [[layer]]
 name = "analysis"
-modules = ["extract", "resolve", "rules", "report", "semantic", "graph_view"]
+modules = ["extract", "resolve", "rules", "report", "semantic", "graph_view", "baseline"]
 depends_on = ["config"]
 pure = true
 
@@ -28,9 +28,14 @@ modules = ["load", "scip_index"]
 depends_on = ["core"]
 
 [[layer]]
+name = "pipeline"
+modules = ["pipeline"]
+depends_on = ["analysis", "io"]
+
+[[layer]]
 name = "cli"
 modules = ["cli"]
-depends_on = ["analysis", "io"]
+depends_on = ["pipeline"]
 
 [layers]
 require_all = true

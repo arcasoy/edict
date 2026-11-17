@@ -50,6 +50,14 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
             .collect();
         out.push(Violation {
             rule: "cycles",
+            key: format!(
+                "cycles:{}",
+                comp.iter()
+                    .map(|&m| a.name(m))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            baselined: false,
             severity,
             message,
             notes,

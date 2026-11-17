@@ -409,3 +409,139 @@ fn parent_child_cycles_fail_by_default() {
         ]
     );
 }
+
+/// Copy a fixture into a fresh temp dir so a test can write a baseline and edit files.
+fn scratch(name: &str) -> PathBuf {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "edict-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    copy(&fixture(name), &dir);
+    dir
+}
+
+fn edict_in(dir: &std::path::Path, args: &[&str]) -> (i32, String) {
+    let mut all = vec!["edict"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--path", dir.to_str().unwrap()]);
+    run(&all)
+}
+
+#[test]
+fn baseline_tolerates_recorded_violations_and_fails_new_ones() {
+    let dir = scratch("violations");
+    let (code, text) = edict_in(&dir, &["baseline"]);
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = edict_in(&dir, &[]);
+    assert_eq!(code, 0, "recorded violations pass: {text}");
+    assert!(text.contains("13 baselined"), "{text}");
+    assert!(
+        !text.contains("error["),
+        "baselined findings are hidden by default: {text}"
+    );
+
+    let app = dir.join("src/app/mod.rs");
+    let mut src = std::fs::read_to_string(&app).unwrap();
+    src.push_str("\npub static mut NEW: u8 = 0;\n");
+    std::fs::write(&app, src).unwrap();
+    let (code, text) = edict_in(&dir, &[]);
+    assert_eq!(code, 1, "{text}");
+    assert_eq!(
+        text.matches("error[").count(),
+        1,
+        "only the new violation is reported: {text}"
+    );
+    assert!(text.contains("static `NEW`"), "{text}");
+
+    let (code, text) = edict_in(&dir, &["--show-baselined"]);
+    assert_eq!(code, 1);
+    assert!(text.contains("(baselined)"), "{text}");
+
+    let (code, _) = edict_in(&dir, &["--no-baseline"]);
+    assert_eq!(code, 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn baseline_never_grows_without_accept_new() {
+    let dir = scratch("violations");
+    edict_in(&dir, &["baseline"]);
+    let before = std::fs::read_to_string(dir.join("edict-baseline.json")).unwrap();
+    let app = dir.join("src/app/mod.rs");
+    let mut src = std::fs::read_to_string(&app).unwrap();
+    src.push_str("\npub static mut NEW: u8 = 0;\n");
+    std::fs::write(&app, src).unwrap();
+
+    let (code, text) = edict_in(&dir, &["baseline"]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("aren't in the baseline"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("edict-baseline.json")).unwrap(),
+        before,
+        "unchanged"
+    );
+
+    let (code, text) = edict_in(&dir, &["baseline", "--accept-new"]);
+    assert_eq!(code, 0, "{text}");
+    let (code, _) = edict_in(&dir, &[]);
+    assert_eq!(code, 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ratchet_locks_in_fixes_and_shrinking_cycles_stay_known() {
+    let dir = scratch("parent_child");
+    edict_in(&dir, &["baseline"]);
+    // Break the sibling edge: the 3-module cycle shrinks to shop <-> shop::cart.
+    std::fs::write(
+        dir.join("src/shop/stock.rs"),
+        "pub fn level() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    let (code, text) = edict_in(&dir, &[]);
+    assert_eq!(
+        code, 0,
+        "a smaller cycle inside a recorded one is not new: {text}"
+    );
+
+    let (code, text) = edict_in(&dir, &["baseline"]);
+    assert_eq!(code, 0, "{text}");
+    let base = std::fs::read_to_string(dir.join("edict-baseline.json")).unwrap();
+    assert!(
+        base.contains("\"cycles:shop,shop::cart\""),
+        "ratchet records the smaller cycle: {base}"
+    );
+    assert!(!base.contains("shop::stock"), "{base}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn baseline_reports_fixed_entries() {
+    let dir = scratch("violations");
+    edict_in(&dir, &["baseline"]);
+    std::fs::write(
+        dir.join("src/billing/tax.rs"),
+        "pub fn rate(cents: u64) -> u64 {\n    cents / 10\n}\n",
+    )
+    .unwrap();
+    let (code, text) = edict_in(&dir, &[]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("1 baselined violation is fixed"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -50,8 +50,37 @@ cargo edict          # fast check (exit 1 on errors)
 ```
 
 Options: `--path <dir>` (crate or workspace), `--config <file>`, `--format json`,
-`--full`, `--scip <index>`, `--hook`. Subcommands: `check` (default), `init`, `graph`. Workspaces are expanded automatically. Each
+`--full`, `--scip <index>`, `--hook`, `--baseline <file>`, `--no-baseline`,
+`--show-baselined`. Subcommands: `check` (default), `init`, `baseline`, `graph`. Workspaces are expanded automatically. Each
 member uses its own `edict.toml`, falling back to the workspace root's.
+
+## Adopting on an existing codebase: the baseline
+
+A real codebase starts with violations. Record them once, and from then on only
+**new** violations fail:
+
+```sh
+cargo edict baseline          # writes edict-baseline.json; commit it
+cargo edict                   # recorded violations pass, new ones fail
+```
+
+The baseline is a ratchet. It only ever shrinks:
+
+- **Fixes are detected.** When recorded violations stop occurring, the check
+  says so; re-run `cargo edict baseline` to lock the improvement in.
+- **It never absorbs new violations.** Re-running `cargo edict baseline` while
+  new violations exist leaves the file untouched and lists them. Fix them, or
+  pass `--accept-new` to record them deliberately.
+- **It survives unrelated edits.** Entries are keyed by what is wrong (rule +
+  modules + item), never by line number, so moving code around doesn't churn it.
+- **Shrinking cycles stay known.** A cycle is covered if its modules are a
+  subset of a recorded cycle's, so breaking part of a tangle never reads as a
+  new violation.
+
+Baselined violations are hidden by default and counted in the summary
+(`--show-baselined` lists them). `--no-baseline` ignores the file. Hooks pick
+the baseline up automatically, so an agent sees only the violations it caused,
+plus a nudge when it has fixed old ones.
 
 ## Two modes
 
