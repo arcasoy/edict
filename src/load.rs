@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::attrs::is_cfg_test;
-use crate::model::{ModId, Module};
+use crate::model::{Loc, ModId, Module, Visibility};
 
 /// A crate to analyze.
 #[derive(Debug, Clone)]
@@ -16,6 +16,8 @@ pub struct CrateRoot {
     pub dir: PathBuf,
     /// `src/lib.rs`, `src/main.rs`, or a `[lib] path`.
     pub root_file: PathBuf,
+    /// Rooted at a library target rather than a binary.
+    pub is_lib: bool,
 }
 
 pub struct LoadedCrate {
@@ -69,10 +71,11 @@ fn visit(
             .ok_or_else(|| format!("{} has no package.name", manifest.display()))?
             .replace('-', "_");
         match root_file(path, &table) {
-            Some(root_file) => found.crates.push(CrateRoot {
+            Some((root_file, is_lib)) => found.crates.push(CrateRoot {
                 name,
                 dir: path.to_path_buf(),
                 root_file,
+                is_lib,
             }),
             None if is_root && workspace.is_none() => {
                 return Err(format!("no library or binary target in {}", path.display()));
@@ -118,7 +121,7 @@ fn visit(
 
 /// The crate's root file: `[lib] path`, `src/lib.rs`, `src/main.rs`, or the
 /// first `[[bin]]` with a path.
-fn root_file(dir: &Path, table: &toml::Table) -> Option<PathBuf> {
+fn root_file(dir: &Path, table: &toml::Table) -> Option<(PathBuf, bool)> {
     let declared_lib = table
         .get("lib")
         .and_then(|l| l.get("path"))
@@ -132,14 +135,14 @@ fn root_file(dir: &Path, table: &toml::Table) -> Option<PathBuf> {
         .find_map(|b| b.get("path").and_then(|p| p.as_str()))
         .map(|p| dir.join(p));
     [
-        declared_lib,
-        Some(dir.join("src/lib.rs")),
-        Some(dir.join("src/main.rs")),
-        first_bin,
+        declared_lib.map(|p| (p, true)),
+        Some((dir.join("src/lib.rs"), true)),
+        Some((dir.join("src/main.rs"), false)),
+        first_bin.map(|p| (p, false)),
     ]
     .into_iter()
     .flatten()
-    .find(|p| p.is_file())
+    .find(|(p, _)| p.is_file())
 }
 
 /// Expand a workspace member pattern (`crates/*`, `axum-*`, `.`) into crate directories.
@@ -183,6 +186,27 @@ fn wildcard(pattern: &str, name: &str) -> bool {
         }
     }
     go(pattern.as_bytes(), name.as_bytes())
+}
+
+fn visibility(v: &syn::Visibility) -> Visibility {
+    match v {
+        syn::Visibility::Public(_) => Visibility::Public,
+        syn::Visibility::Inherited => Visibility::Private,
+        syn::Visibility::Restricted(r) => {
+            let path: Vec<String> = r
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            match path.as_slice() {
+                [one] if one == "crate" => Visibility::Crate,
+                [one] if one == "super" => Visibility::Super,
+                [one] if one == "self" => Visibility::Private,
+                _ => Visibility::Restricted(path),
+            }
+        }
+    }
 }
 
 /// Parse the crate starting at its root file and follow every `mod` declaration.
@@ -246,6 +270,8 @@ fn add_module(
         children: BTreeMap::new(),
         inline,
         lines,
+        vis: Visibility::Private,
+        decl: None,
     });
     loaded.items.push(Vec::new());
 
@@ -305,6 +331,12 @@ fn add_module(
                 }
             }
         };
+        let decl_file = loaded.modules[id].file.clone();
+        loaded.modules[child].vis = visibility(&m.vis);
+        loaded.modules[child].decl = Some(Loc {
+            file: decl_file,
+            line: m.ident.span().start().line,
+        });
         loaded.modules[id].children.insert(name, child);
     }
 

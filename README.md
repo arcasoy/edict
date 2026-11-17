@@ -29,7 +29,7 @@ edict: `shop`: 3 errors, 0 warnings (8 modules, 41 edges)
 |---|-----|---------|---------|
 | 1 | **No cycles.** The module graph is a DAG, down to individual `.rs` files. | `cycles` | error |
 | 2 | **Layers point down.** Modules depend only on their own layer or layers declared below. | `layers` | error (when layers are declared) |
-| 3 | **Facades only.** Outside a top-level module, you may use only what it exports at its root: `crate::billing::Invoice` yes, `crate::billing::tax::rate` no. | `facade` | error |
+| 3 | **Facades only.** Modules inside a top-level module stay private to it (`mod tax;`, never `pub(crate) mod tax;`), so the compiler rejects reach-ins. Outside code uses only the root's exports: `crate::billing::Invoice` yes, `crate::billing::tax::rate` no. | `facade` | error |
 | 4 | **Pure core.** Layers marked `pure` may not touch fs, net, env, processes, threads, clocks, randomness, or async runtimes. | `purity` | error (for `pure` layers) |
 | 5 | **No global mutable state.** No `static mut`, no statics holding `Mutex`/`RwLock`/`RefCell`/`Cell`/atomics, no `thread_local!`, outside an allowlist. | `global-state` | error |
 | – | **Soft limits.** File length and fan-out. | `limits` | warning |
@@ -136,6 +136,10 @@ exec cargo edict --full
 # edict.toml
 [cycles]
 granularity = "file"     # "file": no cycles between any .rs files. "top": only between top-level modules.
+allow_parent_child = false  # adoption knob: excuse mod.rs <-> child cycles (sibling cycles still fail)
+
+[facade]
+allow_public_modules = false  # library crates: allow nested `pub mod` as deliberate public API
 
 [global_state]
 allow = ["infra::runtime"]
@@ -168,6 +172,19 @@ depends_on = ["app"]
 [layers]
 require_all = true       # every top-level module must be in a layer
 ```
+
+Notes on the two strictest defaults:
+
+- **Parent↔child cycles fail.** Re-exports (`pub use child::X` in `mod.rs`) are
+  not dependencies, but a `mod.rs` that calls a child while the child uses
+  `super::SomeType` is a real cycle. The fix is mechanical: move shared types
+  out of `mod.rs` into a child (e.g. `types.rs`). `allow_parent_child` excuses
+  only module↔direct-parent loops while you migrate.
+- **Submodule visibility is checked where it's declared.** Anything whose scope
+  reaches outside its top-level module fails: `pub(crate)`, `pub`, and
+  `pub(super)` on a direct child of a top-level module (its `super` is the
+  crate root, so it's crate-wide). Private or `pub(super)` deeper down is fine.
+  Expose items with `pub use` at the top-level module's root.
 
 Every rule takes `level = "error" | "warn" | "off"`. Unknown keys are rejected,
 so typos fail loudly.

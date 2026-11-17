@@ -26,6 +26,45 @@ pub struct Module {
     pub inline: bool,
     /// Line count of the file (0 for inline modules).
     pub lines: usize,
+    /// Visibility on its `mod` declaration (`Private` for the crate root).
+    pub vis: Visibility,
+    /// Where its `mod` declaration is (`None` for the crate root).
+    pub decl: Option<Loc>,
+}
+
+/// Visibility of a `mod` declaration, as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Visibility {
+    Private,
+    /// `pub`
+    Public,
+    /// `pub(crate)`
+    Crate,
+    /// `pub(super)`
+    Super,
+    /// `pub(self)` / `pub(in path)`: the path as written, e.g. `["crate", "billing"]`.
+    Restricted(Vec<String>),
+}
+
+impl Visibility {
+    pub fn keyword(&self) -> String {
+        match self {
+            Visibility::Private => "private".into(),
+            Visibility::Public => "pub".into(),
+            Visibility::Crate => "pub(crate)".into(),
+            Visibility::Super => "pub(super)".into(),
+            Visibility::Restricted(p) => format!("pub(in {})", p.join("::")),
+        }
+    }
+}
+
+/// The region a declaration is visible in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// This module and everything inside it.
+    Within(ModId),
+    /// Other crates too (`pub` all the way out).
+    External,
 }
 
 impl Module {
@@ -139,6 +178,8 @@ pub struct ExternRef {
 #[derive(Debug, Clone)]
 pub struct Analysis {
     pub crate_name: String,
+    /// Library crate (rooted at lib.rs / `[lib] path`) rather than a binary.
+    pub is_lib: bool,
     pub modules: Vec<Module>,
     pub edges: Vec<Edge>,
     pub externs: Vec<ExternRef>,
@@ -189,6 +230,35 @@ impl Analysis {
     /// are already resolved through it to `child`.
     pub fn is_barrel(&self, e: &Edge) -> bool {
         e.kind == RefKind::PubUse && self.is_descendant(e.to, e.from)
+    }
+
+    /// Where module `m` is visible, per the visibility on its `mod`
+    /// declaration (in its parent `p`): private -> `p`; `pub(super)` -> `p`'s
+    /// parent; `pub(crate)` -> the root; `pub(in path)` -> that module; `pub` ->
+    /// external. `None` if a restricted path doesn't resolve.
+    pub fn scope_of(&self, m: ModId) -> Option<Scope> {
+        let Some(p) = self.modules[m].parent else {
+            return Some(Scope::External);
+        };
+        let parent_of = |x: ModId| self.modules[x].parent;
+        Some(match &self.modules[m].vis {
+            Visibility::Private => Scope::Within(p),
+            Visibility::Public => Scope::External,
+            Visibility::Crate => Scope::Within(ROOT),
+            Visibility::Super => Scope::Within(parent_of(p)?),
+            Visibility::Restricted(path) => {
+                let mut cur = p;
+                for (i, seg) in path.iter().enumerate() {
+                    cur = match seg.as_str() {
+                        "crate" if i == 0 => ROOT,
+                        "self" if i == 0 => p,
+                        "super" => parent_of(cur)?,
+                        name => *self.modules[cur].children.get(name)?,
+                    };
+                }
+                Scope::Within(cur)
+            }
+        })
     }
 
     pub fn name(&self, id: ModId) -> String {

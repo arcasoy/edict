@@ -91,7 +91,9 @@ fn facade_sees_paths_inside_macros() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|x| x["rule"] == "facade")
+        .filter(|x| {
+            x["rule"] == "facade" && x["message"].as_str().unwrap().contains("reaches into")
+        })
         .flat_map(|x| x["notes"].as_array().unwrap().clone())
         .map(|n| n["loc"]["line"].as_u64().unwrap())
         .collect();
@@ -335,4 +337,103 @@ fn graph_writes_interactive_page() {
         && name(&e["to"]) == "infra"));
     assert_eq!(data["layers"].as_array().unwrap().len(), 3);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn submodules_must_stay_private_to_their_top_level_module() {
+    let v = json("visibility");
+    let msgs: Vec<String> = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["rule"] == "facade")
+        .map(|x| x["message"].as_str().unwrap().to_string())
+        .collect();
+    let expect = [
+        "`billing::tax` is declared `pub(crate)`, making it visible outside `billing`",
+        "`billing::ledger` is declared `pub(super)`, making it visible outside `billing`",
+        "`billing::api` is declared `pub`, making it visible outside `billing`",
+        "`billing::invoice::deep` is declared `pub(crate)`, making it visible outside `billing`",
+    ];
+    for e in expect {
+        assert!(msgs.iter().any(|m| m == e), "missing `{e}` in {msgs:?}");
+    }
+    assert_eq!(
+        msgs.len(),
+        expect.len(),
+        "allowed declarations must pass: {msgs:?}"
+    );
+}
+
+#[test]
+fn library_may_opt_in_to_nested_public_modules() {
+    let path = fixture("visibility");
+    let cfg = path.join("edict-public-api.toml");
+    let (_, text) = run(&[
+        "edict",
+        "--format",
+        "json",
+        "--path",
+        path.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let msgs: Vec<&str> = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["message"].as_str().unwrap())
+        .collect();
+    assert!(!msgs.iter().any(|m| m.contains("billing::api")), "{msgs:?}");
+    assert!(
+        msgs.iter().any(|m| m.contains("billing::tax")),
+        "pub(crate) still fails: {msgs:?}"
+    );
+}
+
+#[test]
+fn parent_child_cycles_fail_by_default() {
+    let v = json("parent_child");
+    let cycles: Vec<&str> = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["rule"] == "cycles")
+        .map(|x| x["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        cycles,
+        [
+            "module cycle: shop -> shop::cart -> shop (3 modules are entangled: shop, shop::cart, shop::stock)"
+        ]
+    );
+}
+
+#[test]
+fn allow_parent_child_keeps_sibling_cycles() {
+    let path = fixture("parent_child");
+    let cfg = path.join("edict-allow.toml");
+    let (_, text) = run(&[
+        "edict",
+        "--format",
+        "json",
+        "--path",
+        path.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let cycles: Vec<&str> = v[0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["rule"] == "cycles")
+        .map(|x| x["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        cycles,
+        ["module cycle: shop::cart -> shop::stock -> shop::cart"],
+        "the sibling cycle must still fail"
+    );
 }

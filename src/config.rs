@@ -60,6 +60,9 @@ pub enum Granularity {
 pub struct CyclesCfg {
     pub level: Level,
     pub granularity: Granularity,
+    /// Ignore cycles between a module and its direct parent (`mod.rs` uses a
+    /// child, the child uses `super::Type`). An adoption knob; off by default.
+    pub allow_parent_child: bool,
 }
 
 impl Default for CyclesCfg {
@@ -67,20 +70,26 @@ impl Default for CyclesCfg {
         Self {
             level: Level::Error,
             granularity: Granularity::File,
+            allow_parent_child: false,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct RuleCfg {
+pub struct FacadeCfg {
     pub level: Level,
+    /// Library crates only: allow `pub mod` below top-level modules, for a
+    /// deliberately nested public API (e.g. `mylib::parse::Parser`).
+    /// `pub(crate)` and other crate-internal leaks still fail.
+    pub allow_public_modules: bool,
 }
 
-impl Default for RuleCfg {
+impl Default for FacadeCfg {
     fn default() -> Self {
         Self {
             level: Level::Error,
+            allow_public_modules: false,
         }
     }
 }
@@ -188,7 +197,7 @@ impl Default for LayersCfg {
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub cycles: CyclesCfg,
-    pub facade: RuleCfg,
+    pub facade: FacadeCfg,
     pub global_state: GlobalStateCfg,
     pub purity: PurityCfg,
     pub limits: LimitsCfg,
@@ -279,11 +288,19 @@ pub const TEMPLATE: &str = r#"# edict.toml — architecture laws for this crate.
 level = "error"
 # "file": no cycles between any two .rs files. "top": only between top-level modules.
 granularity = "file"
+# Adoption knob: ignore cycles between a module and its direct parent
+# (mod.rs calls a child, the child uses `super::Type`). Fix them instead by
+# moving shared types out of mod.rs into a child, e.g. types.rs.
+allow_parent_child = false
 
 [facade]
-# Code outside a top-level module may only use what that module exports at its root:
-# crate::billing::Invoice is fine, crate::billing::tax::rate is not.
+# Every module inside a top-level module stays private: `mod tax;`, never
+# `pub(crate) mod tax;`. Expose items with `pub use tax::rate;` at the root.
+# Code outside may only use the root's exports: crate::billing::Invoice is
+# fine, crate::billing::tax::rate is not.
 level = "error"
+# Library crates only: allow nested `pub mod` as deliberate public API.
+allow_public_modules = false
 
 [global_state]
 # No `static mut`, no statics holding Mutex/RwLock/RefCell/Cell/atomics, no thread_local!.

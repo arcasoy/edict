@@ -256,6 +256,7 @@ fn build(root: &CrateRoot, index: Option<&LoadedIndex>) -> Result<Built, String>
 
     let analysis = Analysis {
         crate_name: root.name.clone(),
+        is_lib: root.is_lib,
         modules: loaded.modules,
         edges,
         externs,

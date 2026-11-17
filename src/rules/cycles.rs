@@ -18,8 +18,14 @@ pub fn check(a: &Analysis, cfg: &Config) -> Vec<Violation> {
     let n = a.modules.len();
     let mut adj = vec![BTreeSet::new(); n];
     let mut witness: BTreeMap<(ModId, ModId), &Edge> = BTreeMap::new();
+    // Parent of a graph node, in the same granularity (inline modules roll up).
+    let parent_node = |n: ModId| a.modules[n].parent.map(node_of);
     for e in a.edges.iter().filter(|e| !a.is_barrel(e)) {
         let (f, t) = (node_of(e.from), node_of(e.to));
+        let parent_child = parent_node(f) == Some(t) || parent_node(t) == Some(f);
+        if cfg.cycles.allow_parent_child && parent_child {
+            continue;
+        }
         if f != t {
             adj[f].insert(t);
             witness.entry((f, t)).or_insert(e);
