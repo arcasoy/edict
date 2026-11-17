@@ -60,9 +60,6 @@ pub enum Granularity {
 pub struct CyclesCfg {
     pub level: Level,
     pub granularity: Granularity,
-    /// Ignore cycles between a module and its direct parent (`mod.rs` uses a
-    /// child, the child uses `super::Type`). An adoption knob; off by default.
-    pub allow_parent_child: bool,
 }
 
 impl Default for CyclesCfg {
@@ -70,7 +67,6 @@ impl Default for CyclesCfg {
         Self {
             level: Level::Error,
             granularity: Granularity::File,
-            allow_parent_child: false,
         }
     }
 }
@@ -288,10 +284,6 @@ pub const TEMPLATE: &str = r#"# edict.toml — architecture laws for this crate.
 level = "error"
 # "file": no cycles between any two .rs files. "top": only between top-level modules.
 granularity = "file"
-# Adoption knob: ignore cycles between a module and its direct parent
-# (mod.rs calls a child, the child uses `super::Type`). Fix them instead by
-# moving shared types out of mod.rs into a child, e.g. types.rs.
-allow_parent_child = false
 
 [facade]
 # Every module inside a top-level module stays private: `mod tax;`, never

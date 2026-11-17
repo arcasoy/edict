@@ -409,31 +409,3 @@ fn parent_child_cycles_fail_by_default() {
         ]
     );
 }
-
-#[test]
-fn allow_parent_child_keeps_sibling_cycles() {
-    let path = fixture("parent_child");
-    let cfg = path.join("edict-allow.toml");
-    let (_, text) = run(&[
-        "edict",
-        "--format",
-        "json",
-        "--path",
-        path.to_str().unwrap(),
-        "--config",
-        cfg.to_str().unwrap(),
-    ]);
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let cycles: Vec<&str> = v[0]["violations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|x| x["rule"] == "cycles")
-        .map(|x| x["message"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        cycles,
-        ["module cycle: shop::cart -> shop::stock -> shop::cart"],
-        "the sibling cycle must still fail"
-    );
-}

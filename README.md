@@ -136,7 +136,6 @@ exec cargo edict --full
 # edict.toml
 [cycles]
 granularity = "file"     # "file": no cycles between any .rs files. "top": only between top-level modules.
-allow_parent_child = false  # adoption knob: excuse mod.rs <-> child cycles (sibling cycles still fail)
 
 [facade]
 allow_public_modules = false  # library crates: allow nested `pub mod` as deliberate public API
@@ -178,8 +177,7 @@ Notes on the two strictest defaults:
 - **Parent↔child cycles fail.** Re-exports (`pub use child::X` in `mod.rs`) are
   not dependencies, but a `mod.rs` that calls a child while the child uses
   `super::SomeType` is a real cycle. The fix is mechanical: move shared types
-  out of `mod.rs` into a child (e.g. `types.rs`). `allow_parent_child` excuses
-  only module↔direct-parent loops while you migrate.
+  out of `mod.rs` into a child (e.g. `types.rs`).
 - **Submodule visibility is checked where it's declared.** Anything whose scope
   reaches outside its top-level module fails: `pub(crate)`, `pub`, and
   `pub(super)` on a direct child of a top-level module (its `super` is the
